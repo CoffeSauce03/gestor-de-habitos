@@ -17,7 +17,7 @@ INSTALLED_APPS = [
     'dados', # O nosso app!
 ]
 
-# --- CÓDIGO CORRIGIDO (ADICIONAR ISTO) ---
+# --- ESTA É A PARTE QUE FALTAVA ---
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware', # Necessário
@@ -30,7 +30,7 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = 'config.urls'
 
-# --- CÓDIGO CORRIGIDO (ADICIONAR ISTO) ---
+# --- ESTA É A OUTRA PARTE QUE FALTAVA ---
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
