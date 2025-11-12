@@ -17,6 +17,7 @@ INSTALLED_APPS = [
     'dados', # O nosso app!
 ]
 
+# --- CÓDIGO CORRIGIDO (ADICIONAR ISTO) ---
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware', # Necessário
@@ -26,7 +27,10 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware', # Necessário
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
 ROOT_URLCONF = 'config.urls'
+
+# --- CÓDIGO CORRIGIDO (ADICIONAR ISTO) ---
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
@@ -42,7 +46,9 @@ TEMPLATES = [
         },
     },
 ]
+
 WSGI_APPLICATION = 'config.wsgi.application'
+# --- FIM DAS CORREÇÕES ---
 
 DATABASES = {
     'default': {
