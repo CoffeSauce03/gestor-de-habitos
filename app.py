@@ -1,221 +1,230 @@
 import streamlit as st
-import os
-import sys
-import django
-from datetime import date
+import sqlite3
+import hashlib
 import pandas as pd
 import plotly.express as px
-from django.db.models import Count
-from django.core.management import execute_from_command_line
+from datetime import date
 import time
 
-# --- 1. CONFIGURAÇÃO E INICIALIZAÇÃO DO DJANGO ---
+# --- CONFIGURAÇÃO DA BASE DE DADOS (SQLite Puro) ---
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DJANGO_PROJECT_PATH = os.path.join(BASE_DIR, 'config')
-sys.path.append(DJANGO_PROJECT_PATH)
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+def get_connection():
+    # Cria/Conecta ao ficheiro 'habitos.db' automaticamente
+    conn = sqlite3.connect('habitos.db', check_same_thread=False)
+    return conn
 
-# Inicializa o Django
-django.setup()
+def init_db():
+    """Cria as tabelas se elas não existirem (substitui o 'migrate' do Django)"""
+    conn = get_connection()
+    c = conn.cursor()
+    
+    # Tabela de Utilizadores
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL
+        )
+    ''')
+    
+    # Tabela de Hábitos
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS habitos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            nome TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES usuarios(id)
+        )
+    ''')
+    
+    # Tabela de Registos (Dias concluídos)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS registros (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            habito_id INTEGER,
+            data_registro DATE,
+            FOREIGN KEY(habito_id) REFERENCES habitos(id)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
 
-# Importa os modelos APÓS a inicialização
-from dados.models import Usuario, Habito, Registro
+# --- FUNÇÕES DE LÓGICA (BACKEND) ---
 
-@st.cache_resource
-def inicializar_banco():
-    """
-    Executa as migrações do Django para criar o banco de dados.
-    O cache do Streamlit impede que isto execute mais de uma vez por sessão.
-    """
-    print("--- INICIALIZANDO BANCO DE DADOS ---")
+def hash_senha(senha):
+    """Criptografa a senha antes de guardar"""
+    return hashlib.sha256(senha.encode()).hexdigest()
+
+def criar_usuario(username, password):
+    conn = get_connection()
+    c = conn.cursor()
+    senha_segura = hash_senha(password)
     try:
-        manage_py_path = os.path.join(DJANGO_PROJECT_PATH, 'manage.py')
-        
-        # Como as migrações já estão no GitHub, apenas executamos 'migrate'.
-        # Se precisar de recriar as migrações, descomente a linha abaixo.
-        # execute_from_command_line([manage_py_path, 'makemigrations', 'dados'])
-        
-        execute_from_command_line([manage_py_path, 'migrate'])
-        
-        print("Banco de dados inicializado e migrado com sucesso.")
-    except Exception as e:
-        print(f"Aviso durante inicialização do banco: {e}")
+        c.execute('INSERT INTO usuarios (username, password) VALUES (?, ?)', (username, senha_segura))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False # Utilizador já existe
+    finally:
+        conn.close()
 
-# --- 2. FUNÇÕES DE LÓGICA (BACKEND) ---
-
-def registrar_usuario_db(username, password):
-    if Usuario.objects.filter(username=username).exists():
-        st.error("Este nome de usuário já está em uso.")
-        return None
-    user = Usuario(username=username)
-    user.set_password(password)
-    user.save()
+def autenticar_usuario(username, password):
+    conn = get_connection()
+    c = conn.cursor()
+    senha_segura = hash_senha(password)
+    c.execute('SELECT id, username FROM usuarios WHERE username = ? AND password = ?', (username, senha_segura))
+    user = c.fetchone() # Retorna (id, username) ou None
+    conn.close()
     return user
 
-def autenticar_usuario_db(username, password):
-    try:
-        user = Usuario.objects.get(username=username)
-        if user.check_password(password):
-            return user
-    except Usuario.DoesNotExist:
-        return None
-    return None
+def adicionar_habito(user_id, nome):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('INSERT INTO habitos (user_id, nome) VALUES (?, ?)', (user_id, nome))
+    conn.commit()
+    conn.close()
 
-# Função para a Estória de Usuário 1 (EU1)
-def adicionar_habito_db(nome, user):
-    if nome: 
-        Habito.objects.create(nome=nome, usuario=user)
-        return True
-    return False
+def listar_habitos(user_id):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('SELECT id, nome FROM habitos WHERE user_id = ? ORDER BY nome', (user_id,))
+    habitos = c.fetchall() # Lista de tuplas [(id, nome), ...]
+    conn.close()
+    return habitos
 
-def remover_habito_db(habito_id, user):
-    try:
-        habito = Habito.objects.get(id=habito_id, usuario=user)
-        habito.delete()
-        st.success(f"Hábito '{habito.nome}' removido!")
-        return True
-    except Habito.DoesNotExist:
-        st.error("Erro ao remover hábito.")
-        return False
+def remover_habito(habito_id):
+    conn = get_connection()
+    c = conn.cursor()
+    # Remove registos associados primeiro para manter a integridade
+    c.execute('DELETE FROM registros WHERE habito_id = ?', (habito_id,))
+    c.execute('DELETE FROM habitos WHERE id = ?', (habito_id,))
+    conn.commit()
+    conn.close()
 
-def buscar_habitos_db(user): 
-    return Habito.objects.filter(usuario=user).order_by('nome')
-
-def marcar_habito_db(habito_id, marcar_como_concluido):
-    habito = Habito.objects.get(id=habito_id)
+def verificar_habito_hoje(habito_id):
+    conn = get_connection()
+    c = conn.cursor()
     hoje = date.today()
-    if marcar_como_concluido:
-        # Cria o registro se não existir
-        Registro.objects.get_or_create(habito=habito, data_registro=hoje)
-    else:
-        # Remove o registro se existir
-        Registro.objects.filter(habito=habito, data_registro=hoje).delete()
+    c.execute('SELECT id FROM registros WHERE habito_id = ? AND data_registro = ?', (habito_id, hoje))
+    existe = c.fetchone()
+    conn.close()
+    return existe is not None
 
-# Função para a Estória de Usuário 2 (EU2)
-def buscar_dados_grafico_db(user):
-    dados = Registro.objects.filter(habito__usuario=user).values('habito__nome').annotate(total=Count('id')).order_by('-total')
-    df = pd.DataFrame(list(dados))
-    if not df.empty: 
-        df.rename(columns={'habito__nome': 'Hábito', 'total': 'Dias Cumpridos'}, inplace=True)
+def alternar_habito_hoje(habito_id, marcar):
+    conn = get_connection()
+    c = conn.cursor()
+    hoje = date.today()
+    if marcar:
+        # Tenta inserir, se já existir ignora (OR IGNORE)
+        c.execute('INSERT OR IGNORE INTO registros (habito_id, data_registro) VALUES (?, ?)', (habito_id, hoje))
+    else:
+        c.execute('DELETE FROM registros WHERE habito_id = ? AND data_registro = ?', (habito_id, hoje))
+    conn.commit()
+    conn.close()
+
+def obter_dados_grafico(user_id):
+    conn = get_connection()
+    # Query SQL para contar quantos dias cada hábito foi cumprido
+    query = '''
+        SELECT h.nome as Hábito, COUNT(r.id) as Dias_Cumpridos
+        FROM habitos h
+        LEFT JOIN registros r ON h.id = r.habito_id
+        WHERE h.user_id = ?
+        GROUP BY h.id
+        ORDER BY Dias_Cumpridos DESC
+    '''
+    df = pd.read_sql_query(query, conn, params=(user_id,))
+    conn.close()
     return df
 
-# --- 3. INTERFACE GRÁFICA (STREAMLIT) ---
+# --- INTERFACE GRÁFICA (STREAMLIT) ---
 
 def pagina_login_cadastro():
-    st.set_page_config(page_title="Gestor de Hábitos")
     st.title("Gestor de Hábitos")
-    aba_login, aba_cadastro = st.tabs(["Login", "Cadastro"])
-    with aba_login:
-        st.subheader("Acesse sua Conta")
-        with st.form("login_form"):
-            login_usuario = st.text_input("Nome de Usuário", key="login_user")
-            login_senha = st.text_input("Senha", type="password", key="login_pass")
-            if st.form_submit_button("Entrar"):
-                user = autenticar_usuario_db(login_usuario, login_senha)
-                if user:
-                    st.session_state.logged_in = True
-                    st.session_state.user_id = user.id
-                    st.session_state.username = user.username
-                    st.rerun()
-                else: 
-                    st.error("Usuário ou senha inválidos.")
-    with aba_cadastro:
-        st.subheader("Crie sua Conta")
-        with st.form("cadastro_form"):
-            cadastro_usuario = st.text_input("Escolha um Nome de Usuário", key="reg_user")
-            cadastro_senha = st.text_input("Crie uma Senha", type="password", key="reg_pass")
-            if st.form_submit_button("Cadastrar"):
-                if not (cadastro_usuario and cadastro_senha):
-                    st.error("Usuário e senha são obrigatórios.")
+    tab1, tab2 = st.tabs(["Entrar", "Criar Conta"])
+    
+    with tab1:
+        l_user = st.text_input("Utilizador", key="l_user")
+        l_pass = st.text_input("Senha", type="password", key="l_pass")
+        if st.button("Entrar"):
+            user = autenticar_usuario(l_user, l_pass)
+            if user:
+                st.session_state.logged_in = True
+                st.session_state.user_id = user[0]
+                st.session_state.username = user[1]
+                st.success(f"Bem-vindo, {user[1]}!")
+                st.rerun()
+            else:
+                st.error("Utilizador ou senha incorretos.")
+
+    with tab2:
+        n_user = st.text_input("Novo Utilizador", key="n_user")
+        n_pass = st.text_input("Nova Senha", type="password", key="n_pass")
+        if st.button("Registar"):
+            if n_user and n_pass:
+                if criar_usuario(n_user, n_pass):
+                    st.success("Conta criada! Faça login na aba 'Entrar'.")
                 else:
-                    user = registrar_usuario_db(cadastro_usuario, cadastro_senha)
-                    if user:
-                        st.success("Usuário criado com sucesso! Faça o login na aba ao lado.")
-                        time.sleep(2)
-                        st.rerun()
+                    st.error("Esse nome de utilizador já existe.")
+            else:
+                st.warning("Preencha todos os campos.")
 
 def pagina_principal():
-    st.set_page_config(page_title="Painel de Hábitos", layout="wide")
-    user = Usuario.objects.get(id=st.session_state.user_id)
-    
-    st.sidebar.success(f"Bem-vindo(a), {st.session_state.username}!")
+    st.sidebar.title(f"Olá, {st.session_state.username}!")
     if st.sidebar.button("Sair"):
-        for key in list(st.session_state.keys()): del st.session_state[key]
+        st.session_state.logged_in = False
         st.rerun()
 
-    # --- Funcionalidade para Estória de Usuário 1 (EU1) ---
+    # Adicionar Hábito
     with st.expander("➕ Adicionar Novo Hábito"):
-        novo_habito = st.text_input("Qual hábito monitorar?", key="novo_habito", help="Ex: Estudar Python por 1 hora")
-        if st.button("Adicionar Hábito"):
-            if adicionar_habito_db(novo_habito, user): 
-                st.success(f"Hábito '{novo_habito}' adicionado!")
-                time.sleep(1) # Dá tempo para o usuário ler a mensagem
+        novo_habito = st.text_input("Nome do hábito")
+        if st.button("Adicionar"):
+            if novo_habito:
+                adicionar_habito(st.session_state.user_id, novo_habito)
+                st.success("Hábito adicionado!")
+                time.sleep(0.5)
                 st.rerun()
-            else: 
-                st.warning("Digite um nome para o hábito.")
 
-    st.markdown("---")
-    
-    # --- CORREÇÃO DO LAYOUT (EU2) ---
-    # Define as duas colunas principais
-    col1, col2 = st.columns([1, 1]) # Divide a tela em duas colunas de tamanho igual
+    st.divider()
 
+    col1, col2 = st.columns([1, 1])
+
+    # Coluna 1: Lista de Hábitos
     with col1:
-        st.subheader("Meus Hábitos de Hoje")
-        habitos = buscar_habitos_db(user)
+        st.subheader("Hábitos de Hoje")
+        habitos = listar_habitos(st.session_state.user_id)
+        
         if not habitos:
-            st.info("Você ainda não adicionou nenhum hábito.")
+            st.info("Ainda não tem hábitos registados.")
         
-        # Itera por cada hábito e cria sua linha de interação
-        for habito in habitos:
-            col_hab, col_del = st.columns([5, 1]) # Colunas internas para o nome e o lixo
-            
-            with col_hab:
-                marcado_hoje = Registro.objects.filter(habito=habito, data_registro=date.today()).exists()
-                
-                # Captura a mudança de estado do checkbox
-                foi_clicado = st.checkbox(
-                    habito.nome, 
-                    value=marcado_hoje, 
-                    key=f"habito_{habito.id}"
-                )
-                
-                # Lógica de atualização (agora verifica a mudança)
-                if foi_clicado != marcado_hoje:
-                    marcar_habito_db(habito.id, foi_clicado)
-                    st.rerun() # Recarrega a página para atualizar o gráfico
+        for h_id, h_nome in habitos:
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                checked = verificar_habito_hoje(h_id)
+                novo_check = st.checkbox(h_nome, value=checked, key=f"check_{h_id}")
+                if novo_check != checked:
+                    alternar_habito_hoje(h_id, novo_check)
+                    st.rerun()
+            with c2:
+                if st.button("🗑️", key=f"del_{h_id}"):
+                    remover_habito(h_id)
+                    st.rerun()
 
-            with col_del:
-                # --- CORREÇÃO DO BUG DE EXCLUSÃO ---
-                # O `st.rerun()` só é chamado SE o botão for clicado
-                if st.button("🗑️", key=f"del_{habito.id}", help=f"Remover '{habito.nome}'"):
-                    remover_habito_db(habito.id, user)
-                    st.rerun() # Recarrega a página para remover o hábito da lista
-
-    # --- Funcionalidade para Estória de Usuário 2 (EU2) ---
+    # Coluna 2: Gráfico
     with col2:
-        st.subheader("Progresso Geral")
-        df = buscar_dados_grafico_db(user)
-        
-        if df.empty: 
-            st.info("Marque um hábito como concluído para ver o seu progresso aqui.")
-        else: 
-            # Cria o gráfico de barras
-            fig = px.bar(
-                df, 
-                x='Hábito', 
-                y='Dias Cumpridos', 
-                color='Hábito', 
-                title="Total de Dias Cumpridos por Hábito"
-            )
+        st.subheader("Progresso")
+        df = obter_dados_grafico(st.session_state.user_id)
+        if not df.empty and df['Dias_Cumpridos'].sum() > 0:
+            fig = px.bar(df, x='Hábito', y='Dias_Cumpridos', title="Dias Cumpridos")
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.write("Complete hábitos para ver o gráfico.")
 
-# --- 4. LÓGICA PRINCIPAL DA APLICAÇÃO ---
 def main():
-    # Inicializa o banco de dados (só executa uma vez)
-    inicializar_banco()
-
+    # Inicializa a DB ao arrancar o script
+    init_db()
+    
     if 'logged_in' not in st.session_state:
         st.session_state.logged_in = False
 
