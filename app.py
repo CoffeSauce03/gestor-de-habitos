@@ -6,19 +6,13 @@ import plotly.express as px
 from datetime import date
 import time
 
-# --- CONFIGURAÇÃO DA BASE DE DADOS (SQLite Puro) ---
-
 def get_connection():
-    # Cria/Conecta ao ficheiro 'habitos.db' automaticamente
     conn = sqlite3.connect('habitos.db', check_same_thread=False)
     return conn
 
 def init_db():
-    """Cria as tabelas se elas não existirem (substitui o 'migrate' do Django)"""
     conn = get_connection()
     c = conn.cursor()
-    
-    # Tabela de Utilizadores
     c.execute('''
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,8 +20,6 @@ def init_db():
             password TEXT NOT NULL
         )
     ''')
-    
-    # Tabela de Hábitos
     c.execute('''
         CREATE TABLE IF NOT EXISTS habitos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,8 +28,6 @@ def init_db():
             FOREIGN KEY(user_id) REFERENCES usuarios(id)
         )
     ''')
-    
-    # Tabela de Registos (Dias concluídos)
     c.execute('''
         CREATE TABLE IF NOT EXISTS registros (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,14 +36,10 @@ def init_db():
             FOREIGN KEY(habito_id) REFERENCES habitos(id)
         )
     ''')
-    
     conn.commit()
     conn.close()
 
-# --- FUNÇÕES DE LÓGICA (BACKEND) ---
-
 def hash_senha(senha):
-    """Criptografa a senha antes de guardar"""
     return hashlib.sha256(senha.encode()).hexdigest()
 
 def criar_usuario(username, password):
@@ -65,7 +51,7 @@ def criar_usuario(username, password):
         conn.commit()
         return True
     except sqlite3.IntegrityError:
-        return False # Utilizador já existe
+        return False
     finally:
         conn.close()
 
@@ -74,7 +60,7 @@ def autenticar_usuario(username, password):
     c = conn.cursor()
     senha_segura = hash_senha(password)
     c.execute('SELECT id, username FROM usuarios WHERE username = ? AND password = ?', (username, senha_segura))
-    user = c.fetchone() # Retorna (id, username) ou None
+    user = c.fetchone()
     conn.close()
     return user
 
@@ -89,14 +75,13 @@ def listar_habitos(user_id):
     conn = get_connection()
     c = conn.cursor()
     c.execute('SELECT id, nome FROM habitos WHERE user_id = ? ORDER BY nome', (user_id,))
-    habitos = c.fetchall() # Lista de tuplas [(id, nome), ...]
+    habitos = c.fetchall()
     conn.close()
     return habitos
 
 def remover_habito(habito_id):
     conn = get_connection()
     c = conn.cursor()
-    # Remove registos associados primeiro para manter a integridade
     c.execute('DELETE FROM registros WHERE habito_id = ?', (habito_id,))
     c.execute('DELETE FROM habitos WHERE id = ?', (habito_id,))
     conn.commit()
@@ -116,7 +101,6 @@ def alternar_habito_hoje(habito_id, marcar):
     c = conn.cursor()
     hoje = date.today()
     if marcar:
-        # Tenta inserir, se já existir ignora (OR IGNORE)
         c.execute('INSERT OR IGNORE INTO registros (habito_id, data_registro) VALUES (?, ?)', (habito_id, hoje))
     else:
         c.execute('DELETE FROM registros WHERE habito_id = ? AND data_registro = ?', (habito_id, hoje))
@@ -125,7 +109,6 @@ def alternar_habito_hoje(habito_id, marcar):
 
 def obter_dados_grafico(user_id):
     conn = get_connection()
-    # Query SQL para contar quantos dias cada hábito foi cumprido
     query = '''
         SELECT h.nome as Hábito, COUNT(r.id) as Dias_Cumpridos
         FROM habitos h
@@ -137,8 +120,6 @@ def obter_dados_grafico(user_id):
     df = pd.read_sql_query(query, conn, params=(user_id,))
     conn.close()
     return df
-
-# --- INTERFACE GRÁFICA (STREAMLIT) ---
 
 def pagina_login_cadastro():
     st.title("Gestor de Hábitos")
@@ -176,7 +157,6 @@ def pagina_principal():
         st.session_state.logged_in = False
         st.rerun()
 
-    # Adicionar Hábito
     with st.expander("➕ Adicionar Novo Hábito"):
         novo_habito = st.text_input("Nome do hábito")
         if st.button("Adicionar"):
@@ -190,7 +170,6 @@ def pagina_principal():
 
     col1, col2 = st.columns([1, 1])
 
-    # Coluna 1: Lista de Hábitos
     with col1:
         st.subheader("Hábitos de Hoje")
         habitos = listar_habitos(st.session_state.user_id)
@@ -211,7 +190,6 @@ def pagina_principal():
                     remover_habito(h_id)
                     st.rerun()
 
-    # Coluna 2: Gráfico
     with col2:
         st.subheader("Progresso")
         df = obter_dados_grafico(st.session_state.user_id)
@@ -222,7 +200,6 @@ def pagina_principal():
             st.write("Complete hábitos para ver o gráfico.")
 
 def main():
-    # Inicializa a DB ao arrancar o script
     init_db()
     
     if 'logged_in' not in st.session_state:
